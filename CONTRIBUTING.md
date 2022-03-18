@@ -1,0 +1,1 @@
+[Documentation Repository](https://github.com/trexsolutions/smile-docs/blob/main/README.md)

@@ -1,0 +1,20 @@
+---
+controller:
+  installPlugins:
+    - kubernetes:1.29.2
+    - workflow-aggregator:2.6
+    - git:4.7.0
+    - configuration-as-code:1.47
+  additionalPlugins:
+    - job-dsl:1.77
+    - github:1.33.0
+  JCasC:
+    configScripts:
+      welcome-message: |-
+        jenkins:
+          systemMessage: This Jenkins is configured and managed as code!
+      # yamllint disable
+      jobs: |-
+        jobs:
+          - url: https://raw.githubusercontent.com/trexsolutions/smile-jenkins/main/smile.groovy
+      # yamllint enable

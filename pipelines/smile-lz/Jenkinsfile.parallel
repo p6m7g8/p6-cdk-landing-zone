@@ -1,0 +1,132 @@
+/**
+ * Smile/smile-lz-make pipeline
+ * XXX: the account id should not be hard coded
+ * XXX: nor should the region
+ * XXX: Need to generate Jenkinsfile, but you can't with seed jobs
+ * XXX: Literally every single other CI platform can fix this
+ * XXX: https://aws.amazon.com/blogs/containers/advice-for-customers-dealing-with-docker-hub-rate-limits-and-a-coming-soon-announcement/
+ */
+
+/**
+ * We need to make a just provision
+ */
+
+/**
+ * We need to make a provision that skips central
+ */
+
+/**
+ * we default to the T-Rex Config which will be the first golden config
+ * after we acheive an ATO with it for the Landing Zone Environment
+ */
+pipeline {
+    triggers {
+      upstream(
+        upstreamProjects: 'smile-provisioner',
+        threshold: hudson.model.Result.SUCCESS
+      )
+    }
+    parameters {
+        string(name: 'SMILE_AWS_ORG', defaultValue: 'trex', description: 'TBD',)
+    }
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: smile-provision
+    app.kubernetes.io/instance: avm
+    app.kubernetes.io/name: smile
+spec:
+  containers:
+    - name: smile-provisioner
+      image: 121789937014.dkr.ecr.us-east-1.amazonaws.com/trexsolutions/smile-provisioner:latest
+      command:
+        - cat
+      tty: true
+"""
+        }
+    }
+    stages {
+      stage('AVM Hubs Provision Parallel') {
+        parallel {
+          stage('Hub/shared-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'shared-lab-coe-trex')
+              ])
+            }
+          }
+          stage('Hub/security-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'security-lab-coe-trex')
+              ])
+            }
+          }
+          stage('Hub/routing-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'routing-lab-coe-trex')
+              ])
+            }
+          }
+          stage('Hub/logs-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'logs-lab-coe-trex')
+              ])
+            }
+          }
+          stage('Hub/audit-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'audit-lab-coe-trex')
+              ])
+            }
+          }
+        }
+      }
+      stage('AVM Spokes Provision Parallel') {
+        parallel {
+          stage('Spokes/AVM 1') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'AVM 1')
+              ])
+            }
+          }
+          stage('Spokes/T-Rex COE Lab UDAP') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'T-Rex COE Lab UDAP')
+              ])
+            }
+          }
+          stage('Spokes/T-Rex ZTNA') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'T-Rex ZTNA')
+              ])
+            }
+          }
+          stage('Spokes/SmileTraining') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'SmileTraining')
+              ])
+            }
+          }
+          stage('Spokes/avm-1-lab-coe-trex') {
+            steps {
+              build(job: "smile-avm-account-provision", parameters: [
+                string(name: 'ACCOUNT_NAME', value: 'avm-1-lab-coe-trex')
+              ])
+            }
+          }
+        }
+      }
+    }
+}

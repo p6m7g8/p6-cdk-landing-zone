@@ -1,0 +1,20 @@
+---
+account:
+  alias: training-lab-coe-trex
+  accountName: SmileTraining
+  orgEmail: Philip.Gollucci@trexsolutionsllc.com
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+governance:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+network:
+  vpcs:
+    - cidr: 10.253.0.0/16
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+security:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+  alertSubscriptions:
+    - coe-aws-lab-root@trexsolutionsllc.com

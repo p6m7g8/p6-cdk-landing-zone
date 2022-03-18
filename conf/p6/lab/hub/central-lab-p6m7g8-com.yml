@@ -1,0 +1,23 @@
+---
+account:
+  alias: central-lab-p6m7g8-com
+  orgEmail: pgollucci@p6m7g8.com
+  tld:
+    name: p6m7g8.net
+    id: XXXXXXXXXX
+  snsSubscriptions:
+    - pgollucci@p6m7g8.com
+governance:
+  snsSubscriptions:
+    - p6m7g8.com
+network:
+  vpcs:
+    - cidr: 10.255.0.0/16
+      accountVendingMachine: true
+  snsSubscriptions:
+    - pgollucci@p6m7g8.com
+security:
+  snsSubscriptions:
+    - pgollucci@p6m7g8.com
+  alertSubscriptions:
+    - pgollucci@p6m7g8.com

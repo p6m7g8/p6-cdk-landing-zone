@@ -1,0 +1,23 @@
+---
+account:
+  alias: audit-lab-coe-trex
+  accountName: audit-lab-coe-trex
+  orgEmail: pgollucci+trex+aws+audit-lab-coe-trex@p6m7g8.com
+  tld:
+    name: trexcoe.com
+    id: Z2YT6RGKQIG9C
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+governance:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+network:
+  vpcs:
+    - cidr: 10.249.0.0/16
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+security:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+  alertSubscriptions:
+    - coe-aws-lab-root@trexsolutionsllc.com

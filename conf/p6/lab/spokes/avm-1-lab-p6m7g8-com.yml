@@ -1,0 +1,20 @@
+---
+account:
+  alias: avm-1-lab-coe-trex
+  accountName: avm-1-lab-coe-trex
+  orgEmail: pgollucci+trex+aws+avm-1@p6m7g8.com	
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+governance:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+network:
+  vpcs:
+    - cidr: 10.240.0.0/16
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+security:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+  alertSubscriptions:
+    - coe-aws-lab-root@trexsolutionsllc.com

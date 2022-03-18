@@ -1,0 +1,9 @@
+---
+governance:
+  snsSubscriptions:
+    - ONE_REQUIRED@example.com
+  dlmPolicies:
+    - 14
+    - 30
+    - 60
+    - 90

@@ -1,0 +1,55 @@
+/**
+ * Smile/smile-lz-make pipeline
+ * XXX: the account id should not be hard coded
+ * XXX: nor should the region
+ * XXX: Need to generate Jenkinsfile, but you can't with seed jobs
+ * XXX: Literally every single other CI platform can fix this
+ * XXX: https://aws.amazon.com/blogs/containers/advice-for-customers-dealing-with-docker-hub-rate-limits-and-a-coming-soon-announcement/
+ */
+
+/**
+ * We need to make a just provision
+ */
+
+/**
+ * We need to make a provision that skips central
+ */
+
+/**
+ * we default to the T-Rex Config which will be the first golden config
+ * after we acheive an ATO with it for the Landing Zone Environment
+ */
+pipeline {
+    parameters {
+        string(name: 'SMILE_AWS_ORG', defaultValue: 'trex', description: 'TBD',)
+    }
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: smile-provision
+    app.kubernetes.io/instance: avm
+    app.kubernetes.io/name: smile
+spec:
+  containers:
+    - name: smile-provisioner
+      image: 121789937014.dkr.ecr.us-east-1.amazonaws.com/trexsolutions/smile-provisioner:latest
+      command:
+        - cat
+      tty: true
+"""
+        }
+    }
+    stages {
+        stage('Create or Update Landing Zone') {
+          steps {
+            container('smile-provisioner') {
+              sh 'cd /smile ; npx projen lz:make'
+            }
+          }
+        }
+    }
+}

@@ -1,0 +1,6 @@
+---
+security:
+  snsSubscriptions:
+    - ONE_REQUIRED@example.com
+  alertSubscriptions:
+    - ONE_REQUIRED@example.com

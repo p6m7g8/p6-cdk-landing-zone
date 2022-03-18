@@ -1,0 +1,20 @@
+---
+network:
+  snsSubscriptions:
+    - ONE_REQUIRED@example.com
+  vpcs:
+    - vpcName: Main
+      amiPipeline: false
+      accountVendingMachine: false
+      flowlogs: true
+      transitGw: false
+      maxAzs: 3
+      bastion:
+        ssh:
+          - cidr: 108.28.22.237/32
+      endpoints:
+        gateway:
+          - name: s3
+          - name: dynamodb
+        interface:
+          - name: ssm

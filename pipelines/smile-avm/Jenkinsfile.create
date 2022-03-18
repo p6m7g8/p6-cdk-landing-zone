@@ -1,0 +1,51 @@
+/**
+ * Smile/smile-avm-create pipeline
+ * This uses smile-provision:latest + config to create an AWS Org Account
+ * The create happens in a Lambda which polls until its ready.
+ * AWS Bug, its not ready when its ready, Need to poll per capability (particularly IAM/CFT)
+ * Today we just wait 60s which is an eternity in CICD
+ * smile-builder comes from ECR
+ * XXX: the account id should not be hard coded
+ * XXX: nor should the region
+ * XXX: Need to generate Jenkinsfile, but you can't with seed jobs
+ * XXX: Literally every single other CI platform can fix this
+ * XXX: https://aws.amazon.com/blogs/containers/advice-for-customers-dealing-with-docker-hub-rate-limits-and-a-coming-soon-announcement/
+ */
+
+/**
+ * The param ing will need to change when the config/ system moves
+ */
+pipeline {
+   parameters {
+        string(name: 'SMILE_CF_SRC', defaultValue: 'conf/trex/lab/hub/central-lab-coe-trex.yml', description: 'TBD',)
+    }
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: smile-avm-account-create
+    app.kubernetes.io/instance: avm
+    app.kubernetes.io/name: smile
+spec:
+  containers:
+    - name: smile-provisioner
+      image: 121789937014.dkr.ecr.us-east-1.amazonaws.com/trexsolutions/smile-provisioner:latest
+      command:
+        - cat
+      tty: true
+"""
+        }
+    }
+    stages {
+        stage('Request New Account') {
+          steps {
+            container('smile-provisioner') {
+              sh 'cd /smile ; npx projen avm:create'
+            }
+          }
+        }
+    }
+}

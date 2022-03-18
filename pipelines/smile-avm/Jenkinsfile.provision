@@ -1,0 +1,56 @@
+/**
+ * Smile/smile-avm-provision pipeline
+ * This uses smile-provision:latest + config to create an AWS Org Account
+ * The create happens in a Lambda which polls until its ready.
+ * AWS Bug, its not ready when its ready, Need to poll per capability (particularly IAM/CFT)
+ * Today we just wait 60s which is an eternity in CICD
+ * smile-builder comes from ECR
+ * XXX: the account id should not be hard coded
+ * XXX: nor should the region
+ * XXX: Need to generate Jenkinsfile, but you can't with seed jobs
+ * XXX: Literally every single other CI platform can fix this
+ * XXX: https://aws.amazon.com/blogs/containers/advice-for-customers-dealing-with-docker-hub-rate-limits-and-a-coming-soon-announcement/
+ */
+
+/**
+ * This should probably be ORG_EMAIL (unique) not ACCOUNT_NAME (not unique)
+ * default to Training, if you're going to break something break in Training
+ * Also it will be the most brownfieldy due to actual human users.
+ */
+pipeline {
+    triggers {
+        upstream(upstreamProjects: "Smile/smile-provisioner/", threshold: hudson.model.Result.SUCCESS)
+    }
+    parameters {
+        string(name: 'ACCOUNT_NAME', defaultValue: 'SmileTraining', description: 'TBD',)
+    }
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: smile-provision
+    app.kubernetes.io/instance: avm
+    app.kubernetes.io/name: smile
+spec:
+  containers:
+    - name: smile-provisioner
+      image: 121789937014.dkr.ecr.us-east-1.amazonaws.com/trexsolutions/smile-provisioner:latest
+      command:
+        - cat
+      tty: true
+"""
+        }
+    }
+    stages {
+        stage('Deploy/Provision') {
+          steps {
+            container('smile-provisioner') {
+              sh 'cd /smile ; npx projen avm:provision'
+            }
+          }
+        }
+    }
+}

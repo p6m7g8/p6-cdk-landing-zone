@@ -1,0 +1,1183 @@
+#!/bin/sh
+
+# XXX: the above is /bin/sh not /bin/bash or /usr/bin/env bash because
+# XXX: You don't know what container will have what until you add it
+# XXX: someone might not want `alpine`
+
+# shellcheck shell=bash
+
+######################################################################
+#<
+#
+# Function: smile_main()
+#
+#>
+#/ Synopsis
+#/    The entry point for bin/smilectl
+#/
+######################################################################
+smile_main() {
+
+  # sanitize env
+  LC_ALL=C
+  unset SHELL
+  unset TERM
+
+  # default options
+  local flag_debug=0
+
+  # parse options
+  local flag
+  while getopts "dD" flag; do
+    case $flag in
+    D) flag_debug=0 ;;
+    d) flag_debug=1 ;;
+    *) smile_usage 1 "invalid flag" ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  # grab command
+  local cmd="$1"
+  shift 1
+
+  # security 101: only allow valid comamnds
+  case $cmd in
+  conf_merge) ;;
+  deploy) ;;
+  destroy) ;;
+
+  docker_builder_deps) ;;
+  builder_jenkins_deps) ;;
+
+  docker_build) ;;
+  docker_push) ;;
+  docker_tag) ;;
+
+  avm_create) ;;
+  avm_provision) ;;
+  avm_delete) ;;
+
+  lz_make) ;;
+  esac
+
+  # setup -x based on flag_debug
+  [ ${flag_debug} = 1 ] && set -x
+  # exit if any cli errors w/ >0 return code
+  # the commands can still disable locally if needed
+  set -e
+  smile_msg "$cmd"
+  smile_cmd_"${cmd}" "$@"
+  smile_msg_success "$cmd"
+  set +e
+  [ ${flag_debug} = 1 ] && set +x
+
+  return 0
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_builder_jenkins_deps()
+#
+#>
+#/ Synopsis
+#/    This runs on EKS in Jenkins of the build node
+#/    It installs deps to be able to do the docker build et al
+#/
+######################################################################
+smile_cmd_builder_jenkins_deps() {
+
+  apk add bash
+  apk add curl
+  apk add py-pip
+
+  pip install --upgrade pip
+  pip install awscli
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_docker_builder_deps()
+#
+#>
+#/ Synopsis
+#/    This runs on EKS in Jenkins of the build node in the Docker
+#/    This is Docker in Docker (DinD)
+#/    This assumes apk and alpine
+#/
+######################################################################
+smile_cmd_docker_builder_deps() {
+
+  apk add bash
+  apk add docker
+  apk add curl
+  apk add npm
+  apk add yarn
+  apk add py-pip
+
+  # XXX: InfoSec - https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-4074
+  apk add jq
+
+  pip install --upgrade pip
+  pip install awscli
+
+  CI=1 smile_cmd_dep_yq
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_dep_yq()
+#
+#>
+#/ Synopsis
+#/    This needs to be moved to the config/ system when seperated
+#/    yq might be better done in node.js
+#/    The version needs to move to a config
+#/    This will not run on Windows or Mac but would on linux
+#/    This is for CI things
+#/    For local use on Mac: `brew install yq@3`
+#/    Then add it to your PATH i.e: echo 'export PATH="/usr/local/opt/yq@3/bin:$PATH"' >> ~/.zshrc
+#/
+######################################################################
+smile_cmd_dep_yq() {
+
+  # yq
+  if [ -n "$CI" ]; then
+    curl --retry 6 -LsO https://github.com/mikefarah/yq/releases/download/3.3.1/yq_linux_amd64 &&
+      chmod +x yq_linux_amd64 &&
+      mv yq_linux_amd64 yq
+    if [ -z "$GITHUB_WORKFLOW" ]; then
+      mv yq /usr/bin
+    fi
+  fi
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_conf_merge()
+#
+#>
+#/ Synopsis
+#/    This uses `yq` to merge the conf into dist/config.yml
+#/    Then merge jenkins conf into dist/.....
+#/    SMILE_CF should not be defaulted here, its done for newbies
+#/    and until the tests grow dedicated configs
+#/    The Jenkins config is intentionally defaulted to "" if not customized
+#/
+######################################################################
+smile_cmd_conf_merge() {
+
+  [ ! -d dist ] && mkdir -p dist
+  if [ -n "$GITHUB_WORKFLOW" ]; then
+    smile_cmd_dep_yq
+    YQ=./yq
+  else
+    YQ=yq
+  fi
+
+  smile_msg "main config"
+  SMILE_CF=${SMILE_CF:-conf/trex/lab/hub/central-lab-coe-trex.yml}
+  if [ -n "$SMILE_CF" ]; then
+    $YQ m "$SMILE_CF" conf/default/*.yml >dist/config.yml
+    $YQ r dist/config.yml
+  else
+    smile_msg_fail "main config"
+    exit 1
+  fi
+
+  smile_msg "jenkins chart values"
+  SMILE_JENKINS_CF=${SMILE_JENKINS_CF:-}
+  if [ -n "$SMILE_JENKINS_CF" ]; then
+    $YQ m "$SMILE_JENKINS_CF" conf/default/jenkins-chart-values.yaml >dist/jenkins-chart-values.yaml
+  else
+    $YQ m conf/default/jenkins-chart-values.yaml >dist/jenkins-chart-values.yaml
+  fi
+  $YQ r dist/jenkins-chart-values.yaml
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_deploy()
+#
+#>
+#/ Synopsis
+#/    This deploys CDK into an account/region (AwsEnvironments)
+#/    Drift Detection has to be enabled AFTER stack creation
+#/    This is a gap in CloudFormation and thus AWS CDK
+#/
+#/ Environment
+#/  SMILE_STACK - SmileXXXStack
+#/   if set only that stack will be worked on
+#/
+######################################################################
+smile_cmd_deploy() {
+
+  smile_msg "deploying...[SMILE_STACK=$SMILE_STACK]"
+
+  # circuit breaker
+  local enabled
+  enabled=$(smile_org_account_provisioning_enabled_get "dist/config.yml")
+  if [ x"$enabled" = x"false" ]; then
+    return
+  fi
+
+  smile_msg "bootstrap"
+  smile_msg "CDK"
+  if [ -z "$SMILE_STACK" ]; then
+    npx cdk bootstrap
+  fi
+
+  # XXX: This is the right thing to do, but it takes too long
+  # XXX: You can't parallelize it without pagninating or AWS will rate limit you
+  # XXX: We don't have AWS CDK code that needs this yet, so for now its commented out
+  # smile_msg "=> Service Linked Roles"
+  # if [ -z "$SMILE_STACK" ]; then
+  #  smile_service_linked_roles
+  # fi
+
+  smile_msg "Smile Core"
+  smile_deploy "$SMILE_STACK"
+
+  smile_msg "Post Deploy"
+  if [ -z "$SMILE_STACK" ]; then
+    smile_cft_drift_detection
+  fi
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_destroy()
+#
+#>
+#/ Synopsis
+#/    Removes Smile from an account/region (AwsEnvironment)
+#/
+######################################################################
+smile_cmd_destroy() {
+
+  smile_destroy
+
+  # ALL of this is due to AWS Gaps
+  # we could move these into TypeScript as custom L3's like AutoDeleteBucket()
+  smile_buckets_empty
+  smile_buckets_remove
+  smile_trails_remove
+  smile_loggroups_remove
+
+  p6_aws_cdk_svc_bootstrap_destroy
+}
+
+######################################################################
+#<
+#
+# Function: smile_ecr_login(region)
+#
+#  Args:
+#	region -
+#
+#>
+#/ Synopsis
+#/    Logs into ECR without intervention
+#/
+######################################################################
+smile_ecr_login() {
+  local region="$1"
+
+  smile_msg "smile_erc_login($region)"
+
+  # XXX: the account id should not be hard coded
+  aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin 121789937014.dkr.ecr."${region}".amazonaws.com
+
+  smile_msg_success "smile_erc_login($region)"
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_docker_build(docker_org, image, rev, [dockerfile=Dockerfile])
+#
+#  Args:
+#	docker_org -
+#	image -
+#	rev -
+#	OPTIONAL dockerfile - [Dockerfile]
+#
+#>
+#/ Synopsis
+#/    Builds a Docker image, this can be pulled out to begin our own
+#/    Re-usable container pipeline
+#/    https://trexcoe.atlassian.net/browse/TLP-28
+#/
+######################################################################
+smile_cmd_docker_build() {
+  local docker_org="$1"
+  local image="$2"
+  local rev="$3"
+  local dockerfile="${4:-Dockerfile}"
+
+  # XXX: --no-cache is critcally important
+  # XXX: InfoSec --network host is security hole, but there is no other way to do it
+  # XXX: The Jenkins plugin does not set this so does not work in Jenkins on EKS
+  # XXX: This means this cluster MUST be isolated....It is
+  docker build --no-cache --network host -t "${docker_org}/${image}:${rev}" -f "$dockerfile" .
+}
+
+######################################################################
+#<
+#
+# Function: smile_diagnostics()
+#
+#>
+#/ Synopsis
+#/    Add this to a Jenkins Job to see stuff
+#/    or kubectl exec -it --rm foo -- /bin/bash into and look around
+#/
+######################################################################
+smile_diagnostics() {
+
+  smile_msg "smile_diagnostics()"
+
+  env | sort | grep -E '^GIT|^JENKINS|^DOCKER|PATH'
+  pwd
+  uname -a
+  df -h
+  uptime
+  ls
+
+  smile_msg_success "smile_diagnostics()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_docker_tag(docker_org, image, rev)
+#
+#  Args:
+#	docker_org -
+#	image -
+#	rev -
+#
+#>
+#/ Synopsis
+#/    Tags the build with the Jenkis Job bumber and 'latest'
+#/    We could use the git commit sha (and/or)
+#/
+######################################################################
+smile_cmd_docker_tag() {
+  local docker_org="$1"
+  local image="$2"
+  local rev="$3"
+
+  local image_id
+  image_id=$(docker images "${docker_org}/${image}" | grep "${rev}" | tail -1 | awk '{print $3}')
+
+  # XXX: These only work on EC2 since they hit the meta data service
+  # XXX: We should pull defaults from the ENV for laptop use
+  # XXX: Make sure this uses v2 not v1 MDIS (v1 is security vunlerable)
+  local region
+  region=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | awk -F: '/region/ { print $2 }' | sed -e 's/[", ]//g')
+
+  # XXX: These only work on EC2 since they hit the meta data service
+  # XXX: We should pull defaults from the ENV for laptop use
+  # XXX: Make sure this uses v2 not v1 MDIS (v1 is security vunlerable)
+  local account_id
+  account_id=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | awk -F: '/accountId/ { print $2 }' | sed -e 's/[", ]//g')
+
+  docker tag "$image_id" "${account_id}.dkr.ecr.${region}.amazonaws.com/${docker_org}/${image}:${rev}"
+  docker tag "$image_id" "${account_id}.dkr.ecr.${region}.amazonaws.com/${docker_org}/${image}:latest"
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_docker_push(docker_org, image, rev)
+#
+#  Args:
+#	docker_org -
+#	image -
+#	rev -
+#
+#>
+#/ Synopsis
+#/    Upload to ECR
+#/
+######################################################################
+smile_cmd_docker_push() {
+  local docker_org="$1"
+  local image="$2"
+  local rev="$3"
+
+  # XXX: These only work on EC2 since they hit the meta data service
+  # XXX: We should pull defaults from the ENV for laptop use
+  # XXX: Make sure this uses v2 not v1 MDIS (v1 is security vunlerable)
+  local region
+  region=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | awk -F: '/region/ { print $2 }' | sed -e 's/[", ]//g')
+
+  # XXX: These only work on EC2 since they hit the meta data service
+  # XXX: We should pull defaults from the ENV for laptop use
+  # XXX: Make sure this uses v2 not v1 MDIS (v1 is security vunlerable)
+  local account_id
+  account_id=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | awk -F: '/accountId/ { print $2 }' | sed -e 's/[", ]//g')
+
+  # Login to ECR
+  smile_ecr_login "$region"
+
+  # Push both!
+  # Note smile-cdk sets scanOnPush w/ Clair
+  docker push "${account_id}.dkr.ecr.${region}.amazonaws.com/${docker_org}/${image}:${rev}"
+  docker push "${account_id}.dkr.ecr.${region}.amazonaws.com/${docker_org}/${image}:latest"
+}
+
+######################################################################
+#<
+#
+# Function: smile_service_linked_roles()
+#
+#>
+#/ Synopsis
+#/   Makes service linked roles. 225 needs to be updated as more come out
+#/   A variable Regex is non trivial
+#/
+######################################################################
+smile_service_linked_roles() {
+
+  smile_msg "smile_service_linked_roles()"
+
+  set +e
+  for svc in $(aws help | awk '/o /{ print $2 }' | tail -225 | xargs); do
+    aws iam create-service-linked-role --aws-service-name "$svc".amazonaws.com
+  done >/dev/null 2>&1
+  set -e
+  aws iam list-roles --output text --query 'Roles[].[RoleId,RoleName,Arn]' | grep AWSServiceRoleFor
+
+  smile_msg_success "smile_service_linked_roles()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_deploy(stack)
+#
+#  Args:
+#	stack -
+#
+#>
+#/ Synopsis
+#/    Deploys the 4 stacks
+#/    The order can not currently be changed
+#/
+######################################################################
+smile_deploy() {
+  local stack="$1"
+
+  # XXX: These only work on EC2 since they hit the meta data service
+  # XXX: We should pull defaults from the ENV for laptop use
+  # XXX: Make sure this uses v2 not v1 MDIS (v1 is security vunlerable)
+  if [ -z "$AWS_DEFAULT_REGION" ]; then
+    local region
+    region=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | awk -F: '/region/ { print $2 }' | sed -e 's/[", ]//g')
+    export AWS_DEFAULT_REGION=$region
+  fi
+
+  local first
+  first=0 # XXX: tmp
+
+  if [ $first -eq 1 ]; then
+    smile_deploy_first "$stack"
+  else
+    smile_deploy_not_first "$stack"
+  fi
+
+  smile_msg_success "smile_deploy($stack)"
+}
+
+smile_deploy_not_first() {
+  local stack="$1"
+
+  if [ -z "$stack" ]; then
+    stack="--all"
+  fi
+
+  npx cdk deploy --no-version-reporting --no-metadata --no-pathdata --require-approval never "$stack"
+}
+
+smile_deploy_first() {
+  smile_msg "smile_deploy($stack)"
+
+  local notification_arn
+
+  ## I must be first
+  ## I must run 2x so the 2nd on can use the notification_arn of the SNS Topic I make
+  ## Bug in Cloud Formation, Bug in AWS CDK (issue was declined to CFT)
+  smile_msg "SNS Topics"
+  npx cdk deploy SmileAccountStack --no-version-reporting --no-metadata --no-pathdata --require-approval never
+
+  smile_msg "Account Stack"
+  notification_arn=$(aws sns list-topics --output text --query 'Topics[].[TopicArn]' | grep "SmileSNSAccount")
+  npx cdk deploy SmileAccountStack --no-version-reporting --no-metadata --no-pathdata --require-approval never --notification-arns "$notification_arn"
+
+  smile_msg "Governance Stack"
+  notification_arn=$(aws sns list-topics --output text --query 'Topics[].[TopicArn]' | grep "SmileSNSGovernance")
+  npx cdk deploy SmileGovernanceStack --no-version-reporting --no-metadata --no-pathdata --require-approval never --exclusively --notification-arns "$notification_arn"
+
+  smile_msg "Network Stack"
+  notification_arn=$(aws sns list-topics --output text --query 'Topics[].[TopicArn]' | grep "SmileSNSNetwork")
+  npx cdk deploy SmileNetworkStack --no-version-reporting --no-metadata --no-pathdata --require-approval never --exclusively --notification-arns "$notification_arn"
+
+  smile_msg "AVM Stack"
+  notification_arn=$(aws sns list-topics --output text --query 'Topics[].[TopicArn]' | grep "SmileSNSNetwork")
+  npx cdk deploy SmileAVMStack --no-version-reporting --no-metadata --no-pathdata --require-approval never --exclusively --notification-arns "$notification_arn"
+
+  smile_msg "Security Stack"
+  notification_arn=$(aws sns list-topics --output text --query 'Topics[].[TopicArn]' | grep "SmileSNSSecurity")
+  npx cdk deploy SmileSecurityStack --no-version-reporting --no-metadata --no-pathdata --require-approval never --exclusively --notification-arns "$notification_arn"
+}
+
+######################################################################
+#<
+#
+# Function: smile_cft_drift_detection()
+#
+#>
+#/ Synopsis
+#/    Enables Drift Detection on a CFT Stack AFTER creation
+#/    Can't do this in CFT, an AWS Gap
+#/
+######################################################################
+smile_cft_drift_detection() {
+
+  smile_msg "smile_cft_drift_detection()"
+
+  # XXX: https://github.com/aws/aws-cdk/issues/1723
+  local stack
+  for stack in $(aws cloudformation describe-stacks --output text --query 'Stacks[*].[StackName]' | grep Smile); do
+    echo aws cloudformation detect-stack-drift --stack-name "$stack"
+    (
+      # hilariously, it errors if you already did it but provides no way to query it
+      # so we just ignore the error
+      set +e
+      aws cloudformation detect-stack-drift --stack-name "$stack"
+      set -e
+    )
+  done
+
+  smile_msg_success "smile_cft_drift_detection()"
+}
+
+######################################################################
+#<
+#
+# Function: p6_aws_cdk_svc_bootstrap_destroy()
+#
+#>
+#/ Synopsis
+#/  I run via Jenkins on alpine
+#/  i.e. S3 ARN - arn:aws:s3:::cdktoolkit-stagingbucket-1ok8jxazospbx
+#/  This should be built in to AWS-CDK but was rejected
+######################################################################
+p6_aws_cdk_svc_bootstrap_destroy() {
+
+  smile_msg "p6_aws_cdk_svc_bootstrap_destroy()"
+
+  bucket=$(aws s3 ls | awk '/cdktoolkit-stagingbucket/ { print $3 }')
+  aws s3 rb s3://"$bucket" --force
+  aws cloudformation delete-stack --stack-name CDKToolkit
+
+  smile_msg_success "p6_aws_cdk_svc_bootstrap_destroy()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_loggroups_remove()
+#
+#>
+#/ Synopsis
+#/   Removes Cloud Watch Log Groups
+#/   Some log groups are created internally by L2/L3s in AWS CDK without
+#/   ways to set the retention policy or we could do this in AWS-CDK
+#/   Since we can't its this or a Custom Resource
+#/   This is 3 lines.
+#/
+######################################################################
+smile_loggroups_remove() {
+
+  smile_msg "smile_loggroups_remove()"
+
+  local group
+  for group in $(aws logs describe-log-groups --output text --query "logGroups[].[logGroupName]"); do
+    aws logs delete-log-group --log-group-name "$group"
+  done
+
+  smile_msg_success "smile_loggroups_remove()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_trails_remove()
+#
+#>
+#/ Synopsis
+#/   Removes Cloud Trails
+#/   Some trails are created internally by L2/L3s in AWS CDK without
+#/   ways to set the retention policy or we could do this in AWS-CDK
+#/   Since we can't its this or a Custom Resource
+#/   This is 3 lines.
+#/
+######################################################################
+smile_trails_remove() {
+
+  smile_msg "smile_trails_remove()"
+
+  local trail
+  for trail in $(aws cloudtrail list-trails --output text --query "Trails[].Name"); do
+    aws cloudtrail delete-trail --name "$trail"
+  done
+
+  smile_msg_success "smile_trails_remove()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_buckets_empty()
+#
+#>
+#/ Synopsis
+#/   Empties S3 buckets even with versions
+#/   This can and should become a smile-cdk construct and part of SmileS3
+#/   Other OSS constructs exist but take 200 lines to do this vs the 3 shell lines below
+#/
+######################################################################
+smile_buckets_empty() {
+
+  smile_msg "smile_buckets_empty()"
+
+  local bucket
+  for bucket in $(aws s3 ls | awk '/smile/ { print $3 }'); do
+    python scripts/bucket_versions_delete.py --bucket "$bucket"
+  done
+
+  smile_msg_success "smile_buckets_empty()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_buckets_remove()
+#
+#>
+#/ Synopsis
+#/   Removes the now empty buckets
+#/
+######################################################################
+smile_buckets_remove() {
+
+  smile_msg "smile_buckets_remove()"
+
+  local bucket
+  for bucket in $(aws s3 ls | awk '/smile/ { print $3 }'); do
+    aws s3 rb s3://"$bucket" --force
+  done
+
+  smile_msg_success "smile_buckets_remove()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_destroy()
+#
+#>
+#/ Synopsis
+#/   Removes the smile cdk stacks without prompting for CI reasons
+#/
+######################################################################
+smile_destroy() {
+
+  smile_msg "smile_destroy()"
+
+  npx cdk destroy 'Smile*' --force
+
+  smile_msg_success "smile_destroy()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_avm_create([smile_src_cf=])
+#
+#  Args:
+#	OPTIONAL smile_src_cf - []
+#
+#>
+#/ Synopsis
+#/   Creates an AWS Account in the Organization
+#/
+######################################################################
+smile_cmd_avm_create() {
+  local smile_src_cf="${1:-}"
+
+  if [ -n "$smile_src_cf" ]; then
+    SMILE_SRC_CF=$smile_src_cf # SMILE_SRC_CF is a Jenkins Job Param
+  fi
+
+  # XXX: Tmp until transit gateway and multi region
+  local region="us-east-1"
+  AWS_DEFAULT_REGION=$region
+  AWS_REGION=$region
+
+  export AWS_DEFAULT_REGION
+  export AWS_REGION
+
+  # Lookup Lambda (removes need to know account id)
+  local function_name
+  function_name=$(
+    aws lambda list-functions \
+      --query "Functions[].[FunctionArn]" \
+      --output text |
+      grep "SmileAVMStack-SmileAVMaccountVendingMachine"
+  )
+
+  ## Regen dist/ with the config of the target account
+  SMILE_CF=${SMILE_SRC_CF} smile_cmd_conf_merge
+
+  local email
+  local account_name
+  email=$(smile_account_org_email_get "dist/config.yml")
+  account_name=$(smile_account_name_get "dist/config.yml")
+
+  # circuit breaker if it exists already don't make it
+  local rc
+  rc=$(smile_org_account_exists "$account_name")
+  if [ -n "$rc" ]; then
+    return
+  fi
+
+  local payload
+  payload="{ \"email\": \"$email\", \"accountName\": \"$account_name\" }"
+
+  # Call it
+  # XXX: --pyaload is base64 in v2.0 and plain-text in v1.0
+  # XXX: alpine really doesn't like v2.0
+  # XXX: we should conditionalize this so it works both places
+  # XXX: Since this only runs in Jenkins, this is for v1.0
+  # XXX: this will bomb on laptops unless you downgrade your cli, don't
+  aws lambda invoke --function-name "$function_name" --log-type Tail --payload "$payload" -
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_avm_provision([account_name=${1:-"SmileTraining"], [stack_name=])
+#
+#  Args:
+#	OPTIONAL account_name - [${1:-"SmileTraining"]
+#	OPTIONAL stack_name - []
+#
+#>
+#/ Synopsis
+#/   Wraps deploy (normally on laptop) so Jenkins can use it in the AVM
+#/   Generating the correct config/ first needs to move out and it be passed in
+#/
+######################################################################
+smile_cmd_avm_provision() {
+  # shellcheck disable=2153
+  local account_name=${ACCOUNT_NAME:-${1:-"SmileTraining"}}
+  # shellcheck disable=2153
+  local stack_name="${STACK_NAME:-}"
+
+  local new_account_id
+  new_account_id=$(smile_org_account_id_from_account_name "$account_name")
+  local current_account_id
+  current_account_id=$(aws sts get-caller-identity | jq -r .Account)
+
+  ## Regen dist/ with the config of the target account
+  SMILE_CF_SRC=$(grep -rl "accountName: $account_name" conf)
+  if [ -z "$SMILE_CF_SRC" ]; then
+    SMILE_CF_SRC=$(grep -rl "alias: $account_name" conf)
+  fi
+  SMILE_CF=${SMILE_CF_SRC} smile_cmd_conf_merge
+
+  if [ "$current_account_id" != "$new_account_id" ]; then
+    smile_org_role_assume "$new_account_id"
+  fi
+
+  smile_cmd_deploy "$stack_name"
+
+  if [ "$current_account_id" != "$new_account_id" ]; then
+    smile_sts_role_assume_un
+  fi
+}
+
+######################################################################
+#<
+#
+# Function: smile_cmd_lz_make([org_name=trex])
+#
+#  Args:
+#	OPTIONAL org_name - [trex]
+#
+#>
+#/ Synopsis
+#/   Iterates through the config and makes the landing zone
+#/
+######################################################################
+smile_cmd_lz_make() {
+  # shellcheck disable=2153
+  local org_name=${SMILE_AWS_ORG:-trex}
+
+  smile_lz_make_hub_others "$org_name"
+  smile_lz_make_spokes "$org_name"
+}
+
+######################################################################
+#<
+#
+# Function: smile_lz_make_hub_others(org_name)
+#
+#  Args:
+#	org_name -
+#
+#>
+#/ Synopsis
+#/   Iterates through the config and makes the landing zone
+#/   Hubs
+#/
+######################################################################
+smile_lz_make_hub_others() {
+  local org_name="$1"
+
+  smile_msg "smile_lz_make_hub_others($org_name)"
+
+  local dir="conf/$org_name/lab"
+
+  #### Other hubs
+  # XXX: this needs to be parallel Jenkins
+  # hub/* (alpha sort) - central
+  local hfile
+  # XXX: Don't use ls | grep. Use a glob or a for loop with a condition to allow non-alphanumeric filenames.
+  for hfile in $(ls "$dir/hub" | grep -v central- | sort); do
+    hfile="$dir/hub/$hfile"
+    local account_name
+    account_name=$(smile_account_name_get "$hfile")
+
+    smile_cmd_avm_create "$hfile"
+    sleep 60 # XXX: poll
+    smile_cmd_avm_provision "$account_name"
+  done
+
+  smile_msg_success "smile_lz_make_hub_others($org_name)"
+}
+
+######################################################################
+#<
+#
+# Function: smile_lz_make_spokes(org_name)
+#
+#  Args:
+#	org_name -
+#
+#>
+#/ Synopsis
+#/   Iterates through the config and makes the landing zone
+#/   Spokes
+#/
+######################################################################
+smile_lz_make_spokes() {
+  local org_name="$1"
+
+  smile_msg "smile_lz_make_spokes($org_name)"
+
+  local dir="conf/$org_name/lab"
+
+  ### All spokes last
+  # XXX: this needs to be parallel Jenkins
+  # spoke/* (alpha sort)
+  local sfile
+  # XXX: Use find instead of ls to better handle non-alphanumeric filenames.
+  for sfile in $(ls "$dir/spokes" | sort); do
+    sfile="$dir/spokes/$sfile"
+    local account_name
+    account_name=$(smile_account_name_get "$sfile")
+
+    smile_cmd_avm_create "$sfile"
+    smile_cmd_avm_provision "$account_name"
+  done
+
+  smile_msg_success "smile_lz_make_spokes($org_name)"
+}
+
+######################################################################
+#<
+#
+# Function: smile_org_account_exists(account_name)
+#
+#  Args:
+#	account_name -
+#
+# Return:
+#   new_account_id -
+#
+#>
+#/ Synopsis
+#/   Checks if an account exists in AWS Organizations by name
+#/
+######################################################################
+smile_org_account_exists() {
+  local account_name="$1"
+
+  # strip quotes without shelling out
+  account_name=${account_name//\"/}
+
+  local new_account_id
+  new_account_id=$(
+    aws organizations list-accounts \
+      --query "Accounts[].[Id, Name]" \
+      --output text |
+      grep "$account_name" |
+      cut -f 1
+  )
+
+  echo "$new_account_id"
+}
+
+######################################################################
+#<
+#
+# Function: smile_org_account_id_from_account_name(account_name)
+#
+#  Args:
+#	account_name -
+#
+#>
+#/ Synopsis
+#/   Looks up an account_id from the name in the AWS Organization API
+#/
+######################################################################
+smile_org_account_id_from_account_name() {
+  local account_name="$1"
+
+  local new_account_id
+  new_account_id=$(smile_org_account_exists "$account_name")
+
+  # if the account wasn't found, assume we mean the account we're in
+  # Use Case: this would move bootstrap of Central into Jenkins
+  # Once we get to a MarketPlace ServiceCatalogue
+  if [ -z "$new_account_id" ]; then
+    new_account_id=$(aws sts get-caller-identity | jq -r ".Account")
+  fi
+
+  # return it
+  echo "$new_account_id"
+}
+
+######################################################################
+#<
+#
+# Function: smile_org_role_assume(account_id)
+#
+#  Args:
+#	account_id -
+#
+#>
+#/ Synopsis
+#/   sts:AssumeRole using the role/OrganizationAccountAccessRole
+#/   https://github.com/p6m7g8/p6aws/tree/master/lib/svc/sts
+#/   https://github.com/p6m7g8/p6aws/tree/master/lib/svc/organizations
+#/
+######################################################################
+smile_org_role_assume() {
+  local account_id="$1"
+
+  smile_msg "smile_org_role_assume($account_id)"
+
+  local new_arn
+  new_arn="arn:aws:iam::${account_id}:role/OrganizationAccountAccessRole"
+  local role_session_name="tsmile"
+
+  # XXX: This is not parallel safe, need an mkstemp for the path
+  aws sts assume-role --role-arn "$new_arn" --role-session-name "$role_session_name" >/tmp/cred.json
+  access_key_id=$(jq -r ".Credentials.AccessKeyId" </tmp/cred.json)
+  secret_access_key=$(jq -r ".Credentials.SecretAccessKey" </tmp/cred.json)
+  session_token=$(jq -r ".Credentials.SessionToken" </tmp/cred.json)
+
+  # activate them
+  export AWS_ACCESS_KEY_ID=$access_key_id
+  export AWS_SECRET_ACCESS_KEY=$secret_access_key
+  export AWS_SESSION_TOKEN=$session_token
+
+  smile_msg_success "smile_org_role_assume($account_id)"
+}
+
+######################################################################
+#<
+#
+# Function: smile_sts_role_assume_un()
+#
+#>
+#/ Synopsis
+#/   UN sts:AssumeRole using the role/OrganizationAccountAccessRole
+#/   https://github.com/p6m7g8/p6aws/tree/master/lib/svc/sts
+#/   https://github.com/p6m7g8/p6aws/tree/master/lib/svc/organizations
+#/
+######################################################################
+smile_sts_role_assume_un() {
+
+  smile_msg "smile_org_role_assume_un()"
+
+  # XXX: This is not parallel safe, need an mkstemp for the path
+  rm -f /tmp/cred.json # nuke the cred file from disk, it can't hurt
+
+  # Unactivate them
+  unset AWS_ACCESS_KEY_ID
+  unset AWS_SECRET_ACCESS_KEY
+  unset AWS_SESSION_TOKEN
+
+  smile_msg_success "smile_org_role_assume_un()"
+}
+
+######################################################################
+#<
+#
+# Function: smile_org_account_provisioning_enabled_get()
+#
+#>
+#/ Synopsis
+#/   Get the Account Organization E-mail
+#/
+######################################################################
+smile_org_account_provisioning_enabled_get() {
+  local file="$1"
+
+  local rv
+  rv=$(yq r "$file" "account.orgAccountProvisioningEnabled")
+
+  echo "$rv"
+}
+
+######################################################################
+#<
+#
+# Function: smile_account_org_email_get(file)
+#
+#  Args:
+#	file -
+#
+#>
+#/ Synopsis
+#/   Get the Account Organization E-mail
+#/   An Account can have the SAME name in an organization
+#/   An orgEmail must be globally unique across AWS.
+#/
+######################################################################
+smile_account_org_email_get() {
+  local file="$1"
+
+  local rv
+  rv=$(yq r "$file" "account.orgEmail")
+
+  echo "$rv"
+}
+
+######################################################################
+#<
+#
+# Function: smile_account_name_get(file)
+#
+#  Args:
+#	file -
+#
+#>
+#/ Synopsis
+#/   Get the Account Organization E-mail
+#/   An Account can have the SAME name in an organization
+#/   An orgEmail must be globally unique across AWS.
+#/
+######################################################################
+smile_account_name_get() {
+  local file="$1"
+
+  local rv
+  # if the account.accountName is set use it
+  rv=$(yq r "$file" "account.accountName")
+
+  # Otherwise the account.alias is a REQUIRED field so use it
+  if [ -z "$rv" ]; then
+    rv=$(yq r "$file" "account.alias")
+  fi
+
+  echo "$rv"
+}
+
+######################################################################
+#<
+#
+# Function: smile_msg(...)
+#
+#  Args:
+#   ...
+#
+#>
+#/ Synopsis
+#/  Outputs [banner] followed by message
+#/
+######################################################################
+smile_msg() {
+  echo "=============> $*"
+}
+
+######################################################################
+#<
+#
+# Function: smile_msg_success(...)
+#
+#  Args:
+#   ...
+#
+#>
+#/ Synopsis
+#/  Outputs [CHECK] followed by message
+#/
+######################################################################
+smile_msg_success() {
+
+  echo "✅: $*"
+}
+
+######################################################################
+#<
+#
+# Function: smile_msg_fail(...)
+#
+#  Args:
+#   ...
+#
+#>
+#/ Synopsis
+#/  Outputs [FAIL] followed by message
+#/
+######################################################################s
+smile_msg_fail() {
+
+  echo "❌: $*"
+}
+
+######################################################################
+#<
+#
+# Function: smile_main()
+#
+#>
+#/ Synopsis
+#/   Begin
+#/
+######################################################################
+smile_main "$@"

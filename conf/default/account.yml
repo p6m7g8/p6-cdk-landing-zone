@@ -1,0 +1,16 @@
+---
+account:
+  snsSubscriptions:
+    - ONE_REQUIRED@example.com
+  orgEmail: REQUIRED
+  orgAccountProvisioningEnabled: true
+  tld:
+    name: REQUIRED
+    id: REQUIRED
+  groups:
+    - name: SmileAdmins
+      policies:
+        - AdministratorAccess
+    - name: SmileReadOnly
+      policies:
+        - ReadOnlyAccess

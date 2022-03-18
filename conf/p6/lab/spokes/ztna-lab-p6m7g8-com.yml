@@ -1,0 +1,24 @@
+---
+account:
+  alias: ztna-lab-coe-trex
+  accountName: T-Rex ZTNA
+  orgEmail: pgollucci+trex+aws+lab+ztna@p6m7g8.com
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+governance:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+network:
+  vpcs:
+    - cidr: 10.252.0.0/16
+      bastion:
+        ssh:
+          - cidr: 108.28.31.125/32
+          - cidr: 100.15.42.56/32
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+security:
+  snsSubscriptions:
+    - philip.gollucci@trexsolutionsllc.com
+  alertSubscriptions:
+    - coe-aws-lab-root@trexsolutionsllc.com

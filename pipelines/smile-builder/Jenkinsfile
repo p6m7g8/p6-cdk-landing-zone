@@ -1,0 +1,70 @@
+/**
+ * Smile/smile-builder pipeline
+ * Container Base
+ * This uses docker:latest from dockerhub which is based on alpine and tus apk
+ * https://hub.docker.com/_/docker
+ */
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/instance: builder
+    app.kubernetes.io/name: smile
+spec:
+  containers:
+    - name: docker
+      image: docker
+      command:
+        - cat
+      tty: true
+      volumeMounts:
+        - mountPath: /var/run/docker.sock
+          name: docker-sock
+  volumes:
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
+"""
+        }
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+              git credentialsId: 'jenkins-github', branch: 'main', url: 'https://github.com/trexsolutions/smile-cdk'
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                container('docker') {
+                    sh 'bin/smilectl builder_jenkins_deps'
+                }
+            }
+        }
+        stage('Build smile-builder image') {
+            steps {
+                container('docker') {
+                    sh 'bin/smilectl docker_build trexsolutions smile-builder $BUILD_NUMBER pipelines/smile-builder/Dockerfile'
+                }
+            }
+        }
+        stage('ECR Tag smile-builder') {
+            steps {
+                container('docker') {
+                    sh 'bin/smilectl docker_tag trexsolutions smile-builder $BUILD_NUMBER'
+                }
+            }
+        }
+        stage('Push smile-builder to ECR') {
+            steps {
+                container('docker') {
+                    sh 'bin/smilectl docker_push trexsolutions smile-builder $BUILD_NUMBER'
+                }
+            }
+        }
+    }
+}
